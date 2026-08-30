@@ -31,17 +31,35 @@ const DEFAULT_MODEL = "gpt-4o";
 /**
  * System message sent to the model.
  *
- * Explicitly prohibits the model from recalculating scores or inventing data.
- * Frames the model strictly as an interpreter of provided authoritative scores.
+ * Explicitly prohibits:
+ *   - Recalculating, reinterpreting, or overriding the authoritative scores.
+ *   - Inventing telemetry, contributor behaviour, or commit-level causes.
+ *   - Asserting an unverified root cause for any dimension score.
+ *
+ * Requires evidence-based wording grounded in the supplied scores only.
+ * Recommendations must be tied to the affected dimension, not to unverified causes.
  */
 const SYSTEM_MESSAGE = `\
 You are an expert software engineering analyst. Your task is to write a concise, \
 executive-level risk report for a GitHub repository based on its health analysis results.
 
 Rules you must follow without exception:
-- The health score and all dimension scores supplied to you are AUTHORITATIVE. \
-Do not recalculate, adjust, or contradict them.
-- Do not invent or assume any facts, metrics, or telemetry not present in the data provided.
+- The supplied healthScore and dimension scores are AUTHORITATIVE. Do not recalculate, \
+reinterpret, adjust, or override them.
+- Do not invent telemetry, repository facts, contributor behaviour, commit behaviour, \
+or causes that are not present in the supplied data.
+- Do not claim a specific underlying cause for a low or high score unless that cause \
+is explicitly represented in the supplied input.
+- Describe low scores as weaknesses in the corresponding dimension rather than asserting \
+an unsupported underlying cause.
+  CORRECT:   "The Code Churn dimension scored 1/100, indicating a significant weakness in this area."
+  INCORRECT: "The repository has high code churn." (cause not supplied — do not assert it)
+- Distinguish clearly between what the score demonstrates and what would merely be a \
+possible explanation.
+- Do not claim contributor over-reliance, instability, rework, poor planning, or similar \
+underlying conditions unless that information is explicitly supplied.
+- Recommendations must be framed as actions appropriate for the observed score, not as \
+solutions to an unverified root cause.
 - Do not perform mathematical calculations. Only interpret the numbers given.
 - Write in clear, professional English suitable for a non-technical executive audience.
 - Format the report in Markdown with concise sections.
@@ -76,11 +94,14 @@ ${dimLines}
 
 Using ONLY the information above, write the executive risk report. Include:
 1. A brief summary of the overall health score and what it signals.
-2. The strongest dimension(s) and why they are positive.
-3. The weakest dimension(s) and the risks they indicate.
-4. Two or three concrete, actionable recommendations.
+2. The strongest dimension(s) — describe what the score demonstrates (do not invent reasons).
+3. The weakest dimension(s) — describe the score as a weakness in that dimension; \
+do not assert an underlying cause that is not present in the supplied data.
+4. Two or three concrete, actionable recommendations tied directly to the weakest \
+dimensions, not to unverified root causes.
 
-Do not mention any scores, data, or repository characteristics that are not present above.`;
+Do not mention any scores, data, or repository characteristics that are not present above.
+Do not claim that any cause, behaviour, or condition exists unless it is explicitly stated above.`;
 }
 
 // ---------------------------------------------------------------------------
