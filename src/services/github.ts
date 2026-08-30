@@ -3,8 +3,8 @@
  * GitHub REST API.
  *
  * SPEC.md section 4: GitHub Service is responsible for:
- *   - Repository API  → repository metadata      ← implemented here
- *   - Commit List API → list of recent commits   ← not yet implemented
+ *   - Repository API  → repository metadata      ← implemented
+ *   - Commit List API → list of recent commits   ← implemented here
  *   - Commit Detail API → per-commit file stats  ← not yet implemented
  *
  * Environment variables:
@@ -242,11 +242,28 @@ export async function fetchRepository(
 /**
  * Fetches recent commits for the given repository.
  *
- * @param owner   - Repository owner.
+ * Endpoint: GET /repos/{owner}/{repo}/commits
+ * Docs: https://docs.github.com/en/rest/commits/commits#list-commits
+ *
+ * The branch is passed via the `sha` query parameter, which GitHub accepts as
+ * either a branch name, tag name, or full commit SHA. Using `sha` (rather than
+ * `ref`) is the documented approach for selecting the branch on this endpoint.
+ *
+ * perPage is clamped to [1, 100] — GitHub's hard maximum for a single page.
+ * The initial analysis requests 30 commits; pagination is not implemented.
+ *
+ * @param owner   - Repository owner (user or organization).
  * @param repo    - Repository name.
- * @param branch  - Branch to retrieve commits from.
- * @param perPage - Number of commits to retrieve (max 100 per GitHub API page).
- * @returns Array of commit list items.
+ * @param branch  - Branch name to retrieve commits from (e.g. "main").
+ * @param perPage - Number of commits to retrieve. Clamped to [1, 100].
+ * @returns Array of {@link GitHubCommitListItem} objects, newest first.
+ *
+ * @throws {GitHubNotFoundError}   Repository or branch not found.
+ * @throws {GitHubRateLimitError}  API rate limit exceeded.
+ * @throws {GitHubAuthError}       Token is invalid or missing required scope.
+ * @throws {GitHubServerError}     GitHub returned a 5xx response.
+ * @throws {GitHubNetworkError}    Request timed out or failed at the network layer.
+ * @throws {GitHubApiError}        Response shape is not a non-empty array.
  */
 export async function fetchCommitList(
   owner: string,
@@ -254,12 +271,28 @@ export async function fetchCommitList(
   branch: string,
   perPage = 30
 ): Promise<GitHubCommitListItem[]> {
-  // TODO: implement GitHub REST API call
-  void owner;
-  void repo;
-  void branch;
-  void perPage;
-  throw new Error("Not implemented");
+  // Clamp perPage: GitHub's API enforces a maximum of 100 per page.
+  const safePerPage = Math.min(Math.max(perPage, 1), 100);
+
+  const params = new URLSearchParams({
+    sha: branch,
+    per_page: String(safePerPage),
+  });
+
+  const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits?${params.toString()}`;
+
+  const data = await githubFetch<unknown>(url);
+
+  // Structural validation: GitHub must return an array for a valid branch/repo.
+  // A non-array response (e.g. a JSON error object that slipped past HTTP error
+  // handling) would corrupt downstream normalization silently without this check.
+  if (!Array.isArray(data)) {
+    throw new GitHubApiError(
+      "GitHub commits endpoint returned an unexpected response shape (expected an array)."
+    );
+  }
+
+  return data as GitHubCommitListItem[];
 }
 
 /**
