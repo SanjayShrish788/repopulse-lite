@@ -5,7 +5,7 @@
  * composite 0–100 score across five dimensions:
  *
  *   - Code Churn        (weight: 25%)  ← implemented
- *   - Commit Hygiene    (weight: 20%)  ← not yet implemented
+ *   - Commit Hygiene    (weight: 20%)  ← implemented
  *   - Commit Cadence    (weight: 20%)  ← not yet implemented
  *   - Author Entropy    (weight: 15%)  ← not yet implemented
  *   - Anomaly Detection (weight: 20%)  ← not yet implemented
@@ -126,6 +126,85 @@ export function scoreCodeChurn(commits: NormalizedCommit[]): DimensionScore {
     name: "Code Churn",
     score: clamp(churnScore, 0, 100), // guard against any floating-point edge
     weight: 0.25,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// §5.5 Commit Hygiene Score (weight: 20%)
+// ---------------------------------------------------------------------------
+
+/**
+ * Conventional Commits pattern (SPEC.md §5.5.1).
+ *
+ * Matches the first line of a commit message against:
+ *   <type>[optional scope]: <description>
+ *
+ * Rules:
+ *   - type       : one of the 11 allowed lowercase keywords
+ *   - scope      : optional, wrapped in parentheses, one or more non-")" chars
+ *   - ": "       : literal colon + single space (required by CC spec)
+ *   - description: one or more characters (non-empty, enforced by ".+")
+ *
+ * Anchored with ^ and $ so the full first line must match; no partial matches.
+ */
+const CONVENTIONAL_COMMIT_RE =
+  /^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([^)]+\))?: .+$/;
+
+/**
+ * Scores the Commit Hygiene dimension for the supplied commits.
+ *
+ * Implements SPEC.md §5.5 exactly.
+ *
+ * Per-commit scoring (first line of message only):
+ *   - Matches Conventional Commit pattern → 1.0
+ *   - Does not match, but first line ≥ 20 chars  → 0.5 (substantive free-form)
+ *   - Otherwise                                   → 0.0 (trivial / empty)
+ *
+ * Composite:
+ *   hygieneScore = round((Σ hygieneᵢ / N) × 100)
+ *
+ * N === 0 handling:
+ *   An empty commit window means there is no hygiene data to evaluate.
+ *   The function returns score 0 rather than a neutral 50, because an
+ *   analysis with zero commits represents a genuinely unknown / empty
+ *   repository state. Callers that receive 0 from every dimension will
+ *   produce a 0 composite, which correctly signals "no data" rather than
+ *   "average quality".
+ *
+ * @param commits - Normalized commits from the analysis window (up to 30).
+ * @returns A {@link DimensionScore} with name, score ∈ [0, 100], and weight 0.20.
+ */
+export function scoreCommitHygiene(commits: NormalizedCommit[]): DimensionScore {
+  const N = commits.length;
+
+  if (N === 0) {
+    return { name: "Commit Hygiene", score: 0, weight: 0.20 };
+  }
+
+  // §5.5.2 — Per-commit hygiene score
+  let hygieneSum = 0;
+
+  for (const commit of commits) {
+    // Evaluate only the first line; ignore body and footer.
+    const firstLine = commit.message.split("\n")[0];
+
+    if (CONVENTIONAL_COMMIT_RE.test(firstLine)) {
+      // Full credit: conventional commit
+      hygieneSum += 1.0;
+    } else if (firstLine.length >= 20) {
+      // Partial credit: substantive free-form message
+      hygieneSum += 0.5;
+    }
+    // else: 0.0 — trivial or empty message; nothing added
+  }
+
+  // §5.5.3 — Composite hygiene score
+  const hygieneScore = Math.round((hygieneSum / N) * 100);
+
+  return {
+    name: "Commit Hygiene",
+    score: clamp(hygieneScore, 0, 100),
+    weight: 0.20,
   };
 }
 
