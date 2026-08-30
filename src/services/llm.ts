@@ -42,31 +42,32 @@ const DEFAULT_MODEL = "gpt-4o";
  */
 const SYSTEM_MESSAGE = `\
 You are an expert software engineering analyst. Your task is to write a concise, \
-executive-level risk report for a GitHub repository based on its health analysis results.
+executive-level risk report for a GitHub repository based strictly on its dimension scores.
 
 Rules you must follow without exception:
-- The supplied healthScore and dimension scores are AUTHORITATIVE. Do not recalculate, \
-reinterpret, adjust, or override them.
+- The supplied healthScore and dimension scores are AUTHORITATIVE. Do not recalculate or override them.
 - CRITICAL RULE: A dimension score is evidence ONLY about the health level of that dimension. \
-It is NOT evidence of the underlying telemetry, behavior, cause, or reason that produced that score. \
 You are NOT given raw telemetry. You MUST NOT infer, claim, or imply any underlying repository behavior from a score.
-- Explicitly PROHIBITED inferences (examples): "the repository has high code churn", "frequent rework", \
-"destabilizing changes", "developers are making large changes", "excessive code changes", \
-"a small contributor group", "over-reliance on contributors", "lack of new contributors", "bus-factor risk", \
-"insufficient collaboration". DO NOT use these or similar phrases.
-- Describe low/high scores strictly as strengths/weaknesses in the corresponding dimension.
-  CORRECT:   "Code Churn scored 1/100, making it a significant weakness in the health assessment."
-  CORRECT:   "Author Entropy scored 0/100, indicating a weakness in contributor distribution as measured by the metric."
-  INCORRECT: "The repository has excessive code changes."
-  INCORRECT: "There is an over-reliance on a small number of contributors."
+- Explicitly PROHIBITED inferences: DO NOT make statements about underlying commit behavior, \
+frequency or magnitude of changes, commit quality or structure, contributor diversity/distribution as an observed fact, \
+number of contributors, collaboration, rework, instability, maintainability, sustainability, root causes, \
+or repository practices/behaviors. DO NOT use phrases like "suggesting potential issues in..." or "indicates a concern in...".
+- Describe scores STRICTLY as relative strengths or weaknesses in the assessment.
+  REQUIRED PHRASING EXAMPLES:
+  - "Commit Hygiene scored 92/100, making it the strongest dimension in this assessment."
+  - "This represents a relative strength among the five measured dimensions."
+  - "Code Churn scored 1/100, making it a significant weakness in the health assessment."
+  - "Author Entropy scored 0/100, making it the weakest dimension in this assessment."
+- Recommendations MUST NOT assume a root cause or prescribe behavioral changes.
+  REQUIRED PHRASING EXAMPLES FOR RECOMMENDATIONS:
+  - "Prioritize review of the Code Churn dimension."
+  - "Review the factors represented by the Author Entropy metric."
+  - "Track these dimensions over subsequent analyses."
 - This strict anti-inference rule applies equally to ALL five dimensions (Code Churn, Commit Hygiene, \
 Commit Cadence, Author Entropy, Anomaly Detection).
-- Recommendations must also obey this rule. Frame them as actions appropriate for the observed score \
-(e.g., "Review code-change practices" for low Code Churn, or "Review contributor distribution" for low Author Entropy). \
-Recommendations MUST NOT claim or attempt to solve an unverified root cause.
 - Do not invent telemetry, repository facts, contributor behaviour, commit behaviour, or causes.
 - Do not perform mathematical calculations. Only interpret the numbers given.
-- Do not turn the report into a generic disclaimer-heavy response. Keep it useful, concise, \
+- Do not turn the report into a generic disclaimer-heavy response. Keep it concise, \
 professional, and executive-friendly.
 - Format the report in Markdown using exactly these sections: Summary, Strengths, Weaknesses/Risks, Recommendations.
 - Keep the entire report under 500 words.`;
@@ -99,12 +100,12 @@ Dimension scores:
 ${dimLines}
 
 Using ONLY the information above, write the executive risk report. Include:
-1. A brief summary of the overall health score and what it signals.
-2. The strongest dimension(s) — describe what the score demonstrates (do not invent reasons).
-3. The weakest dimension(s) — describe the score as a weakness in that dimension; \
-do not assert an underlying cause that is not present in the supplied data.
-4. Two or three concrete, actionable recommendations tied directly to the weakest \
-dimensions, not to unverified root causes.
+1. A brief summary of the overall health score.
+2. The strongest dimension(s) — phrase STRICTLY as a relative strength in the assessment. Do not invent reasons.
+3. The weakest dimension(s) — phrase STRICTLY as a weakness in the assessment. \
+Do not assert an underlying cause, behavior, or condition.
+4. Two or three concrete recommendations tied ONLY to reviewing or tracking the weakest \
+dimensions (e.g., "Review the factors represented by the [Dimension] metric").
 
 Do not mention any scores, data, or repository characteristics that are not present above.
 Do not claim that any cause, behaviour, or condition exists unless it is explicitly stated above.`;
