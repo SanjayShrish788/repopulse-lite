@@ -13,19 +13,8 @@ import {
 } from "@/services/github";
 import { normalizeTelemetry, NormalizationError } from "@/lib/normalizer";
 import { scoreRepository } from "@/lib/scorer";
+import { generateReport } from "@/services/llm";
 import type { AnalysisResult, AnalysisError } from "@/types";
-
-// ---------------------------------------------------------------------------
-// Temporary report placeholder
-// ---------------------------------------------------------------------------
-
-/**
- * Placeholder used until generateReport() (src/services/llm.ts) is implemented.
- * The AnalysisResult type requires report: string; this value is never exposed
- * as real LLM output.
- */
-const REPORT_NOT_IMPLEMENTED =
-  "[Report generation not yet implemented — LLM service pending.]";
 
 // ---------------------------------------------------------------------------
 // POST /api/analyze
@@ -44,7 +33,8 @@ const REPORT_NOT_IMPLEMENTED =
  *   5. Fetch per-commit detail for all 30 commits (parallel)
  *   6. Normalize raw GitHub data → RepositoryTelemetry
  *   7. Run deterministic scoring engine → ScoringResult
- *   8. Return AnalysisResult (report is a placeholder until LLM is wired)
+ *   8. Generate executive risk report via LLM → string
+ *   9. Return AnalysisResult
  *
  * Error responses follow the AnalysisError type: { error, code? }
  */
@@ -97,7 +87,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
   const { owner, repo } = validation.parsed;
 
   // -------------------------------------------------------------------------
-  // Steps 3–7 — GitHub API + normalization + scoring (all errors caught below)
+  // Steps 3–8 — GitHub API + normalization + scoring + LLM report (all errors caught below)
   // -------------------------------------------------------------------------
 
   try {
@@ -128,6 +118,12 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
     // Step 7 — Run the deterministic scoring engine.
     const scoring = scoreRepository(telemetry);
 
+    // Step 8 — Generate the executive risk report via the LLM service.
+    // generateReport() throws on missing config, API errors, or empty responses.
+    // Any such error propagates to the catch block below, which returns
+    // HTTP 500 / INTERNAL_ERROR without exposing API keys or provider details.
+    const report = await generateReport(repository.full_name, scoring);
+
     // -----------------------------------------------------------------------
     // Success — return AnalysisResult
     // -----------------------------------------------------------------------
@@ -135,10 +131,7 @@ export async function POST(request: NextRequest): Promise<NextResponse<AnalysisR
     const result: AnalysisResult = {
       repoFullName: repository.full_name,
       scoring,
-      // LLM report is not yet implemented. The AnalysisResult type requires
-      // report: string; a documented placeholder is used until generateReport()
-      // is wired in src/services/llm.ts.
-      report: REPORT_NOT_IMPLEMENTED,
+      report,
       analyzedAt: new Date().toISOString(),
     };
 
