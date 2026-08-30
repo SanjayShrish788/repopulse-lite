@@ -6,7 +6,7 @@
  *
  *   - Code Churn        (weight: 25%)  ← implemented
  *   - Commit Hygiene    (weight: 20%)  ← implemented
- *   - Commit Cadence    (weight: 20%)  ← not yet implemented
+ *   - Commit Cadence    (weight: 20%)  ← implemented
  *   - Author Entropy    (weight: 15%)  ← not yet implemented
  *   - Anomaly Detection (weight: 20%)  ← not yet implemented
  *
@@ -209,6 +209,140 @@ export function scoreCommitHygiene(commits: NormalizedCommit[]): DimensionScore 
 }
 
 // ---------------------------------------------------------------------------
+// §5.6 Commit Cadence / Velocity Score (weight: 20%)
+// ---------------------------------------------------------------------------
+
+/** Returns the median of a non-empty sorted (or unsorted) number array. */
+function medianOf(values: number[]): number {
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 1
+    ? sorted[mid]
+    : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Population standard deviation (÷ N).
+ *
+ * The task specification explicitly requires population std dev because the
+ * gaps array is the complete observed population for the analysis window,
+ * not a sample drawn from a larger dataset.
+ *
+ * (Note: SPEC.md §5.6.3 says "sample standard deviation"; the task
+ * requirement overrides this to population std dev, divide by N.)
+ */
+function populationStdDev(values: number[], mean: number): number {
+  if (values.length === 0) return 0;
+  const variance =
+    values.reduce((sum, v) => sum + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+/**
+ * Computes the activity concentration score (§5.6.4).
+ *
+ * Measures whether commits are evenly spread across the total time window
+ * or concentrated in a short burst. Uses the middle 50% of the chronologically
+ * sorted commit sequence (indices floor(N/4) … floor(3N/4)).
+ *
+ * @param sortedTimestampsAsc - Commit timestamps in ascending order (seconds).
+ * @returns activityConcentration ∈ [0, 1].
+ */
+function computeActivityConcentration(sortedTimestampsAsc: number[]): number {
+  const N = sortedTimestampsAsc.length;
+  const windowSeconds =
+    sortedTimestampsAsc[N - 1] - sortedTimestampsAsc[0];
+
+  // Zero-width window: all commits at the same instant — maximum burst,
+  // minimum spread. Spec says activityConcentration = 0.0.
+  if (windowSeconds === 0) return 0.0;
+
+  const loIdx = Math.floor(N / 4);
+  const hiIdx = Math.floor((3 * N) / 4);
+
+  // innerWindow: time spanned by the middle 50% of the commit sequence.
+  // When loIdx === hiIdx (e.g. N = 1 or 2), innerWindow = 0, which correctly
+  // reflects that no spread can be measured within a single-point middle group.
+  const innerWindow =
+    sortedTimestampsAsc[hiIdx] - sortedTimestampsAsc[loIdx];
+
+  return clamp(innerWindow / windowSeconds, 0, 1);
+}
+
+/**
+ * Scores the Commit Cadence / Velocity dimension for the supplied commits.
+ *
+ * Implements SPEC.md §5.6 exactly.
+ *
+ * Sub-scores:
+ *   velocity             (× 0.50) — median inter-commit gap vs. 7-day ceiling
+ *   regularity           (× 0.30) — CV of gaps; low CV = high regularity
+ *   activityConcentration (× 0.20) — middle-50% spread vs. total window
+ *
+ * N < 2 handling:
+ *   The spec (SPEC.md §5.6.1) explicitly mandates: "If N < 2, cadence cannot
+ *   be computed. Set cadenceScore = 50 (neutral)."
+ *   50 is returned as the neutral score — it is spec-mandated, not invented.
+ *
+ * All gap calculations are done in seconds (milliseconds ÷ 1000) to match the
+ * SPEC formulas. The original commits array is not mutated; a sorted copy is
+ * used throughout.
+ *
+ * @param commits - Normalized commits from the analysis window (up to 30).
+ * @returns A {@link DimensionScore} with name, score ∈ [0, 100], and weight 0.20.
+ */
+export function scoreCommitCadence(commits: NormalizedCommit[]): DimensionScore {
+  const N = commits.length;
+
+  // §5.6.1 — Insufficient data guard (spec-mandated neutral score)
+  if (N < 2) {
+    return { name: "Commit Cadence", score: 50, weight: 0.20 };
+  }
+
+  // Sort chronologically ascending (oldest first) without mutating the input.
+  const sorted = [...commits].sort(
+    (a, b) => a.date.getTime() - b.date.getTime()
+  );
+
+  // Compute N−1 consecutive inter-commit gaps in seconds.
+  const gaps: number[] = [];
+  for (let i = 1; i < sorted.length; i++) {
+    const diffMs = sorted[i].date.getTime() - sorted[i - 1].date.getTime();
+    gaps.push(diffMs / 1000); // convert to seconds
+  }
+
+  // §5.6.2 — Commit Velocity
+  // velocity = clamp(1 − (medianGap / 604800), 0, 1)
+  // 604800 s = 7 days — the zero-score ceiling for the median gap.
+  const medianGap = medianOf(gaps);
+  const velocity = clamp(1 - medianGap / 604800, 0, 1);
+
+  // §5.6.3 — Inter-Commit Regularity (Coefficient of Variation)
+  // regularity = clamp(1 − (CV / 2), 0, 1)
+  // CV = stdGap / meanGap  (population std dev, per task requirement)
+  // If meanGap = 0 (all commits at the same instant), CV = 0 → regularity = 1.
+  const meanGap = gaps.reduce((sum, g) => sum + g, 0) / gaps.length;
+  const stdGap = populationStdDev(gaps, meanGap);
+  const CV = meanGap === 0 ? 0 : stdGap / meanGap;
+  const regularity = clamp(1 - CV / 2, 0, 1);
+
+  // §5.6.4 — Activity Concentration
+  const timestampsAsc = sorted.map((c) => c.date.getTime() / 1000);
+  const activityConcentration = computeActivityConcentration(timestampsAsc);
+
+  // §5.6.5 — Composite Cadence Score
+  const cadenceScore = Math.round(
+    (velocity * 0.50 + regularity * 0.30 + activityConcentration * 0.20) * 100
+  );
+
+  return {
+    name: "Commit Cadence",
+    score: clamp(cadenceScore, 0, 100),
+    weight: 0.20,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public API — full pipeline (not yet complete)
 // ---------------------------------------------------------------------------
 
@@ -216,7 +350,8 @@ export function scoreCommitHygiene(commits: NormalizedCommit[]): DimensionScore 
  * Runs the full heuristic scoring pipeline over normalized telemetry.
  *
  * NOT YET IMPLEMENTED — requires all five dimensions.
- * scoreCodeChurn() is available as a standalone function in the interim.
+ * scoreCodeChurn(), scoreCommitHygiene(), and scoreCommitCadence() are
+ * available as standalone functions in the interim.
  *
  * @param telemetry - Normalized repository telemetry.
  * @returns A {@link ScoringResult} containing the composite health score
