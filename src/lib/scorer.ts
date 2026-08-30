@@ -7,7 +7,7 @@
  *   - Code Churn        (weight: 25%)  ← implemented
  *   - Commit Hygiene    (weight: 20%)  ← implemented
  *   - Commit Cadence    (weight: 20%)  ← implemented
- *   - Author Entropy    (weight: 15%)  ← not yet implemented
+ *   - Author Entropy    (weight: 15%)  ← implemented
  *   - Anomaly Detection (weight: 20%)  ← not yet implemented
  *
  * The LLM is NOT involved in scoring. The deterministic engine is the sole
@@ -343,6 +343,81 @@ export function scoreCommitCadence(commits: NormalizedCommit[]): DimensionScore 
 }
 
 // ---------------------------------------------------------------------------
+// §5.7 Author Entropy Score (weight: 15%)
+// ---------------------------------------------------------------------------
+
+/**
+ * Scores the Author Entropy dimension for the supplied commits.
+ *
+ * Implements SPEC.md §5.7 exactly using normalized Shannon entropy (base-2).
+ *
+ * Author identity:
+ *   authorEmail is used as the unique author key, not authorName.
+ *   Names are mutable (display name changes, multiple spellings) while email
+ *   addresses are a stable, de-duplicatable identity within a commit history.
+ *
+ * Entropy and normalization:
+ *   1. Count commits per author (by email) to get c_k for each author k.
+ *   2. Compute the commit share:  p_k = c_k / N
+ *   3. Raw Shannon entropy:       H = -Σ(p_k × log₂(p_k))
+ *   4. Maximum entropy:           maxEntropy = log₂(K)   (uniform distribution)
+ *   5. Normalized:                normalizedEntropy = H / maxEntropy
+ *   6. Score:                     round(normalizedEntropy × 100)
+ *
+ * Edge cases (all follow SPEC §5.7 exactly):
+ *   N = 0 — no commits, no authors. Returns score 0 (no data).
+ *   K = 1 — single author. SPEC §5.7.2 sets rawEntropy = 0;
+ *            SPEC §5.7.3 guards maxEntropy = log₂(1) = 0 → normalizedEntropy = 0.
+ *            Score = 0 (maximum bus-factor risk).
+ *   K ≥ 2 — normal path; both guards pass, entropy is meaningful.
+ *
+ * @param commits - Normalized commits from the analysis window (up to 30).
+ * @returns A {@link DimensionScore} with name, score ∈ [0, 100], and weight 0.15.
+ */
+export function scoreAuthorEntropy(commits: NormalizedCommit[]): DimensionScore {
+  const N = commits.length;
+
+  // N = 0: no commits, no distribution to compute.
+  if (N === 0) {
+    return { name: "Author Entropy", score: 0, weight: 0.15 };
+  }
+
+  // §5.7.1 — Commit share per author (keyed by authorEmail)
+  const commitsByAuthor = new Map<string, number>();
+  for (const commit of commits) {
+    const prev = commitsByAuthor.get(commit.authorEmail) ?? 0;
+    commitsByAuthor.set(commit.authorEmail, prev + 1);
+  }
+
+  const K = commitsByAuthor.size; // number of distinct authors
+
+  // §5.7.2 — Shannon entropy
+  // Special case: H = 1 → rawEntropy = 0 (spec mandated).
+  let rawEntropy = 0;
+  if (K > 1) {
+    for (const count of commitsByAuthor.values()) {
+      const p = count / N;
+      // p ≥ 1/N > 0, so log2(p) is always finite here; no log(0) risk.
+      rawEntropy -= p * Math.log2(p);
+    }
+  }
+
+  // §5.7.3 — Normalized entropy
+  // maxEntropy = log₂(K); when K = 1, log₂(1) = 0 → guard returns 0.
+  const maxEntropy = Math.log2(K);
+  const normalizedEntropy = maxEntropy === 0 ? 0 : rawEntropy / maxEntropy;
+
+  // §5.7.4 — Composite entropy score
+  const entropyScore = Math.round(normalizedEntropy * 100);
+
+  return {
+    name: "Author Entropy",
+    score: clamp(entropyScore, 0, 100),
+    weight: 0.15,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public API — full pipeline (not yet complete)
 // ---------------------------------------------------------------------------
 
@@ -350,8 +425,8 @@ export function scoreCommitCadence(commits: NormalizedCommit[]): DimensionScore 
  * Runs the full heuristic scoring pipeline over normalized telemetry.
  *
  * NOT YET IMPLEMENTED — requires all five dimensions.
- * scoreCodeChurn(), scoreCommitHygiene(), and scoreCommitCadence() are
- * available as standalone functions in the interim.
+ * scoreCodeChurn(), scoreCommitHygiene(), scoreCommitCadence(), and
+ * scoreAuthorEntropy() are available as standalone functions in the interim.
  *
  * @param telemetry - Normalized repository telemetry.
  * @returns A {@link ScoringResult} containing the composite health score
