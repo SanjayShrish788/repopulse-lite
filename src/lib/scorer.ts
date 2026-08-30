@@ -8,7 +8,7 @@
  *   - Commit Hygiene    (weight: 20%)  ← implemented
  *   - Commit Cadence    (weight: 20%)  ← implemented
  *   - Author Entropy    (weight: 15%)  ← implemented
- *   - Anomaly Detection (weight: 20%)  ← not yet implemented
+ *   - Anomaly Detection (weight: 20%)  ← implemented
  *
  * The LLM is NOT involved in scoring. The deterministic engine is the sole
  * source of truth for numerical output.
@@ -418,15 +418,171 @@ export function scoreAuthorEntropy(commits: NormalizedCommit[]): DimensionScore 
 }
 
 // ---------------------------------------------------------------------------
+// §5.8 Anomaly Health Score (weight: 20%)
+// ---------------------------------------------------------------------------
+
+/**
+ * Identifies which commits belong to at least one burst sequence (§5.8.3).
+ *
+ * A burst is a run of 3 or more consecutive commits (sorted oldest-first) where
+ * every consecutive pair is within 3,600 seconds of each other.
+ *
+ * Algorithm:
+ *   Walk the sorted timestamp array left-to-right. When three or more
+ *   consecutive commits all have gaps ≤ 3,600 s, mark all of them as burst
+ *   members. Continue expanding the run while the next gap also qualifies.
+ *
+ * @param sortedTimestampsAsc - Commit timestamps in ascending order (seconds).
+ * @returns Boolean array parallel to the input; true = this commit is in a burst.
+ */
+function findBurstMembers(sortedTimestampsAsc: number[]): boolean[] {
+  const N = sortedTimestampsAsc.length;
+  const inBurst = new Array<boolean>(N).fill(false);
+
+  const BURST_WINDOW_S = 3600; // 1 hour
+  const MIN_BURST_SIZE = 3;
+
+  let i = 0;
+  while (i <= N - MIN_BURST_SIZE) {
+    // Probe: does a burst of at least 3 start at index i?
+    let runEnd = i;
+    while (
+      runEnd + 1 < N &&
+      sortedTimestampsAsc[runEnd + 1] - sortedTimestampsAsc[runEnd] <= BURST_WINDOW_S
+    ) {
+      runEnd++;
+    }
+
+    if (runEnd - i + 1 >= MIN_BURST_SIZE) {
+      // Mark all commits in this burst run.
+      for (let j = i; j <= runEnd; j++) {
+        inBurst[j] = true;
+      }
+      i = runEnd + 1; // advance past the burst
+    } else {
+      i++;
+    }
+  }
+
+  return inBurst;
+}
+
+/**
+ * Scores the Anomaly Detection / Anomaly Health dimension.
+ *
+ * Implements SPEC.md §5.8 exactly.
+ *
+ * Three anomaly signals (all require commits sorted by timestamp internally):
+ *
+ *   §5.8.1 Oversized commits (weight: 40%)
+ *     Baseline: medianChanges = median(additions + deletions) across all commits.
+ *     Oversized: (additions + deletions) > 3 × medianChanges.
+ *     Threshold: ≥20% of commits oversized → health = 0.
+ *
+ *   §5.8.2 Trivial/empty commits (weight: 30%)
+ *     Trivial: additions = 0 AND deletions = 0 AND filesChanged = 0.
+ *     Threshold: ≥10% of commits trivial → health = 0.
+ *
+ *   §5.8.3 Burst anomaly (weight: 30%)
+ *     Burst: sequence of ≥3 consecutive commits all within 3,600 s of each other.
+ *     Threshold: ≥30% of commits inside any burst → health = 0.
+ *
+ *   §5.8.4 Archived penalty
+ *     If archived = true, the composite is capped at 40 regardless of signals.
+ *
+ * N = 0 handling:
+ *   No commits means no anomalies can be detected. Returns score 100 (perfect
+ *   health) before applying the archived cap (which yields 40 if archived).
+ *   This is consistent with the spec's "higher scores mean fewer anomalies" —
+ *   an empty window has no anomalies.
+ *
+ * Function signature includes `archived` because §5.8.4 requires it and
+ * `archived` lives in RepositoryTelemetry.repository, not in NormalizedCommit[].
+ *
+ * @param commits  - Normalized commits from the analysis window (up to 30).
+ * @param archived - Whether the repository is archived (§5.8.4).
+ * @returns A {@link DimensionScore} with name, score ∈ [0, 100], and weight 0.20.
+ */
+export function scoreAnomalies(
+  commits: NormalizedCommit[],
+  archived: boolean
+): DimensionScore {
+  const N = commits.length;
+
+  // N = 0: no data — no anomalies. Score 100 (then cap if archived).
+  if (N === 0) {
+    const score = archived ? 40 : 100;
+    return { name: "Anomaly Detection", score, weight: 0.20 };
+  }
+
+  // §5.8.1 — Oversized Commit Anomaly
+  // Baseline: median total changes (robust against the outlier being detected).
+  const totalChangesPerCommit = commits.map((c) => c.additions + c.deletions);
+  const medianChanges = medianOf(totalChangesPerCommit);
+
+  const oversizedCount = totalChangesPerCommit.filter(
+    (tc) => tc > 3 * medianChanges
+  ).length;
+  const oversizedRatio = oversizedCount / N;
+  const oversizedHealth = clamp(1 - oversizedRatio / 0.20, 0, 1);
+
+  // §5.8.2 — Trivial / Empty Commit Anomaly
+  // Trivial = zero additions + zero deletions + zero files changed.
+  const trivialCount = commits.filter(
+    (c) => c.additions === 0 && c.deletions === 0 && c.filesChanged === 0
+  ).length;
+  const trivialRatio = trivialCount / N;
+  const trivialHealth = clamp(1 - trivialRatio / 0.10, 0, 1);
+
+  // §5.8.3 — Burst Anomaly
+  // Sort ascending by timestamp; do not mutate the original array.
+  const sortedTimestampsAsc = [...commits]
+    .sort((a, b) => a.date.getTime() - b.date.getTime())
+    .map((c) => c.date.getTime() / 1000); // convert ms → seconds
+
+  const burstFlags = findBurstMembers(sortedTimestampsAsc);
+  const burstCount = burstFlags.filter(Boolean).length;
+  const burstRatio = burstCount / N;
+  const burstHealth = clamp(1 - burstRatio / 0.30, 0, 1);
+
+  // §5.8.5 — Composite Anomaly Health Score
+  const rawAnomalyHealth = Math.round(
+    (oversizedHealth * 0.40 + trivialHealth * 0.30 + burstHealth * 0.30) * 100
+  );
+
+  // §5.8.4 — Archived repository penalty: cap at 40 regardless of signals.
+  const anomalyScore = archived
+    ? Math.min(rawAnomalyHealth, 40)
+    : rawAnomalyHealth;
+
+  return {
+    name: "Anomaly Detection",
+    score: clamp(anomalyScore, 0, 100),
+    weight: 0.20,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Public API — full pipeline (not yet complete)
 // ---------------------------------------------------------------------------
 
 /**
  * Runs the full heuristic scoring pipeline over normalized telemetry.
  *
- * NOT YET IMPLEMENTED — requires all five dimensions.
- * scoreCodeChurn(), scoreCommitHygiene(), scoreCommitCadence(), and
- * scoreAuthorEntropy() are available as standalone functions in the interim.
+ * Implements SPEC.md §5.9. Orchestrates all five standalone dimension scorers
+ * and computes the final weighted health score:
+ *
+ *   healthScore = round(
+ *       codeChurn.score   × 0.25 +
+ *       commitHygiene.score × 0.20 +
+ *       commitCadence.score × 0.20 +
+ *       authorEntropy.score × 0.15 +
+ *       anomalyDetection.score × 0.20
+ *   )
+ *
+ * Weights sum to exactly 1.00.
+ * scoreRepository() does not duplicate or re-implement any dimension formula;
+ * it delegates entirely to the five exported dimension scorers.
  *
  * @param telemetry - Normalized repository telemetry.
  * @returns A {@link ScoringResult} containing the composite health score
@@ -435,7 +591,41 @@ export function scoreAuthorEntropy(commits: NormalizedCommit[]): DimensionScore 
 export function scoreRepository(
   telemetry: RepositoryTelemetry
 ): ScoringResult {
-  // TODO: wire up all five dimension scorers and the weighted composite (§5.9)
-  void telemetry;
-  throw new Error("Not implemented");
+  const { commits, repository } = telemetry;
+
+  // §5.4 — Code Churn (weight: 0.25)
+  const codeChurn = scoreCodeChurn(commits);
+
+  // §5.5 — Commit Hygiene (weight: 0.20)
+  const commitHygiene = scoreCommitHygiene(commits);
+
+  // §5.6 — Commit Cadence / Velocity (weight: 0.20)
+  const commitCadence = scoreCommitCadence(commits);
+
+  // §5.7 — Author Entropy (weight: 0.15)
+  const authorEntropy = scoreAuthorEntropy(commits);
+
+  // §5.8 — Anomaly Health (weight: 0.20)
+  // archived is passed from repository metadata per §5.8.4.
+  const anomalyDetection = scoreAnomalies(commits, repository.archived);
+
+  // §5.9 — Final weighted health score (rounded exactly once at this level)
+  const healthScore = Math.round(
+    codeChurn.score       * 0.25 +
+    commitHygiene.score   * 0.20 +
+    commitCadence.score   * 0.20 +
+    authorEntropy.score   * 0.15 +
+    anomalyDetection.score * 0.20
+  );
+
+  return {
+    healthScore: clamp(healthScore, 0, 100),
+    dimensions: {
+      codeChurn,
+      commitHygiene,
+      commitCadence,
+      authorEntropy,
+      anomalyDetection,
+    },
+  };
 }
