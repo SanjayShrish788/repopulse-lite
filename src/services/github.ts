@@ -5,7 +5,7 @@
  * SPEC.md section 4: GitHub Service is responsible for:
  *   - Repository API  → repository metadata      ← implemented
  *   - Commit List API → list of recent commits   ← implemented here
- *   - Commit Detail API → per-commit file stats  ← not yet implemented
+ *   - Commit Detail API → per-commit file stats  ← implemented here
  *
  * Environment variables:
  *   GITHUB_TOKEN  (optional) Personal Access Token.
@@ -296,21 +296,74 @@ export async function fetchCommitList(
 }
 
 /**
- * Fetches detailed commit information including file stats.
+ * Fetches detailed commit information including file-level change stats.
  *
- * @param owner - Repository owner.
+ * Endpoint: GET /repos/{owner}/{repo}/commits/{sha}
+ * Docs: https://docs.github.com/en/rest/commits/commits#get-a-commit
+ *
+ * The commit SHA is passed as a URL path component encoded with
+ * encodeURIComponent. A valid Git SHA is 40 hex characters and contains no
+ * characters that require encoding, but encoding is applied unconditionally for
+ * consistency with the other path components and to guard against future callers
+ * passing abbreviated SHAs or non-standard refs.
+ *
+ * GitHub omits the `stats` object for commits that touch more than 3,000 files,
+ * and the `files` array may be absent or empty on certain merge commits. Both
+ * cases are treated as an unrecoverable validation failure: the normalizer
+ * requires real numeric values and must not receive invented defaults.
+ *
+ * @param owner - Repository owner (user or organization).
  * @param repo  - Repository name.
- * @param sha   - Commit SHA.
- * @returns Full commit detail object.
+ * @param sha   - Full 40-character commit SHA.
+ * @returns Typed {@link GitHubCommitDetail} object.
+ *
+ * @throws {GitHubNotFoundError}   Commit SHA not found in the repository.
+ * @throws {GitHubRateLimitError}  API rate limit exceeded.
+ * @throws {GitHubAuthError}       Token is invalid or missing required scope.
+ * @throws {GitHubServerError}     GitHub returned a 5xx response.
+ * @throws {GitHubNetworkError}    Request timed out or failed at the network layer.
+ * @throws {GitHubApiError}        Response is missing required stats or files fields.
  */
 export async function fetchCommitDetail(
   owner: string,
   repo: string,
   sha: string
 ): Promise<GitHubCommitDetail> {
-  // TODO: implement GitHub REST API call
-  void owner;
-  void repo;
-  void sha;
-  throw new Error("Not implemented");
+  const url = `${GITHUB_API_BASE}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/commits/${encodeURIComponent(sha)}`;
+
+  const data = await githubFetch<unknown>(url);
+
+  // The response must be a plain object — not an array, null, or primitive.
+  if (typeof data !== "object" || data === null || Array.isArray(data)) {
+    throw new GitHubApiError(
+      `GitHub commit detail endpoint returned an unexpected response shape for SHA ${sha}.`
+    );
+  }
+
+  const raw = data as Record<string, unknown>;
+
+  // Validate `stats` — GitHub omits this object for oversized commits (>3,000
+  // files). Without real stats we cannot compute additions/deletions/total, so
+  // we refuse to return a partially populated object.
+  if (
+    typeof raw["stats"] !== "object" ||
+    raw["stats"] === null ||
+    typeof (raw["stats"] as Record<string, unknown>)["additions"] !== "number" ||
+    typeof (raw["stats"] as Record<string, unknown>)["deletions"] !== "number" ||
+    typeof (raw["stats"] as Record<string, unknown>)["total"] !== "number"
+  ) {
+    throw new GitHubApiError(
+      `GitHub commit detail for SHA ${sha} is missing required stats (additions/deletions/total). ` +
+      "This can happen for commits that touch more than 3,000 files."
+    );
+  }
+
+  // Validate `files` — must be an array (may be empty for root merge commits).
+  if (!Array.isArray(raw["files"])) {
+    throw new GitHubApiError(
+      `GitHub commit detail for SHA ${sha} is missing the required files array.`
+    );
+  }
+
+  return data as GitHubCommitDetail;
 }
