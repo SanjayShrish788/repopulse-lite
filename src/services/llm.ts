@@ -49,15 +49,16 @@ Rules you must follow without exception:
 reinterpret, adjust, or override them.
 - CRITICAL RULE: A dimension score is evidence ONLY about the health level of that dimension. \
 It is NOT evidence of the underlying telemetry, behavior, cause, or reason that produced that score. \
-You are NOT given raw telemetry. You MUST NOT infer or state any underlying repository behavior from a score.
+You are NOT given raw telemetry. You MUST NOT infer, claim, or imply any underlying repository behavior from a score.
 - Explicitly PROHIBITED inferences (examples): "the repository has high code churn", "frequent rework", \
 "destabilizing changes", "developers are making large changes", "excessive code changes", \
-"contributor over-reliance", "lack of new contributors", "small contributor group", "bus factor risk", \
+"a small contributor group", "over-reliance on contributors", "lack of new contributors", "bus-factor risk", \
 "insufficient collaboration". DO NOT use these or similar phrases.
 - Describe low/high scores strictly as strengths/weaknesses in the corresponding dimension.
   CORRECT:   "Code Churn scored 1/100, making it a significant weakness in the health assessment."
-  CORRECT:   "Author Entropy scored 0/100, indicating a significant weakness in this dimension."
+  CORRECT:   "Author Entropy scored 0/100, indicating a weakness in contributor distribution as measured by the metric."
   INCORRECT: "The repository has excessive code changes."
+  INCORRECT: "There is an over-reliance on a small number of contributors."
 - This strict anti-inference rule applies equally to ALL five dimensions (Code Churn, Commit Hygiene, \
 Commit Cadence, Author Entropy, Anomaly Detection).
 - Recommendations must also obey this rule. Frame them as actions appropriate for the observed score \
